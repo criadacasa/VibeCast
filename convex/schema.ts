@@ -240,4 +240,400 @@ export default defineSchema({
   })
     .index("name", ["name"])
     .index("isDone", ["isDone"]),
+
+  // ========== SaaS BILLING & SUBSCRIPTION SYSTEM ==========
+  
+  /*
+   * Subscription plans available in the platform
+   */
+  subscriptionPlans: defineTable({
+    name: v.string(), // e.g., "Free", "Starter", "Pro", "Enterprise"
+    displayName: v.string(),
+    description: v.string(),
+    isActive: v.boolean(),
+    // Pricing
+    monthlyPrice: v.number(), // in cents
+    yearlyPrice: v.optional(v.number()), // in cents, with discount
+    currency: v.string(), // e.g., "USD"
+    // Stripe configuration
+    stripePriceIdMonthly: v.optional(v.string()),
+    stripePriceIdYearly: v.optional(v.string()),
+    stripeProductId: v.optional(v.string()),
+    // Credits & limits
+    monthlyCredits: v.number(), // credits allocated per month
+    rolloverCredits: v.boolean(), // whether unused credits carry over
+    maxRolloverCredits: v.optional(v.number()),
+    // Feature limits
+    maxProjects: v.union(v.number(), v.literal("unlimited")),
+    maxApiIntegrations: v.union(v.number(), v.literal("unlimited")),
+    maxTeamMembers: v.union(v.number(), v.literal("unlimited")),
+    maxDeployments: v.union(v.number(), v.literal("unlimited")),
+    // Features access
+    features: v.array(v.string()), // e.g., ["custom_domain", "priority_support", "advanced_analytics"]
+    // API rate limits per minute
+    apiRateLimit: v.number(),
+    sortOrder: v.number(),
+  })
+    .index("byName", ["name"])
+    .index("byIsActive", ["isActive", "sortOrder"]),
+
+  /*
+   * User subscriptions
+   */
+  subscriptions: defineTable({
+    memberId: v.id("convexMembers"),
+    planId: v.id("subscriptionPlans"),
+    status: v.union(
+      v.literal("active"),
+      v.literal("cancelled"),
+      v.literal("past_due"),
+      v.literal("trialing"),
+      v.literal("paused"),
+    ),
+    // Billing period
+    billingPeriod: v.union(v.literal("monthly"), v.literal("yearly")),
+    currentPeriodStart: v.number(), // timestamp
+    currentPeriodEnd: v.number(), // timestamp
+    cancelAtPeriodEnd: v.boolean(),
+    // Stripe data
+    stripeSubscriptionId: v.optional(v.string()),
+    stripeCustomerId: v.optional(v.string()),
+    // Trial
+    trialStart: v.optional(v.number()),
+    trialEnd: v.optional(v.number()),
+    // Metadata
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "status"])
+    .index("byStripeSubscriptionId", ["stripeSubscriptionId"])
+    .index("byStatus", ["status", "currentPeriodEnd"]),
+
+  /*
+   * Credit balances for users
+   */
+  creditBalances: defineTable({
+    memberId: v.id("convexMembers"),
+    balance: v.number(), // current credit balance
+    lifetimeEarned: v.number(), // total credits ever earned
+    lifetimeSpent: v.number(), // total credits ever spent
+    lastResetAt: v.number(), // last time monthly credits were added
+    updatedAt: v.number(),
+  }).index("byMemberId", ["memberId"]),
+
+  /*
+   * Credit transaction history
+   */
+  creditTransactions: defineTable({
+    memberId: v.id("convexMembers"),
+    amount: v.number(), // positive for credit, negative for debit
+    balanceAfter: v.number(),
+    type: v.union(
+      v.literal("purchase"),
+      v.literal("monthly_allocation"),
+      v.literal("bonus"),
+      v.literal("refund"),
+      v.literal("usage_deduction"),
+      v.literal("rollover"),
+    ),
+    description: v.string(),
+    // Related entities
+    subscriptionId: v.optional(v.id("subscriptions")),
+    chatId: v.optional(v.id("chats")),
+    usageRecordId: v.optional(v.id("usageRecords")),
+    // Metadata
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "createdAt"])
+    .index("byType", ["type", "createdAt"]),
+
+  /*
+   * Detailed usage tracking for billing
+   */
+  usageRecords: defineTable({
+    memberId: v.id("convexMembers"),
+    chatId: v.optional(v.id("chats")),
+    // Usage type
+    resourceType: v.union(
+      v.literal("llm_tokens"),
+      v.literal("api_call"),
+      v.literal("storage"),
+      v.literal("deployment"),
+      v.literal("data_source_query"),
+    ),
+    // Quantification
+    quantity: v.number(), // e.g., token count, API calls
+    creditCost: v.number(), // credits deducted
+    // LLM specific
+    modelId: v.optional(v.string()),
+    promptTokens: v.optional(v.number()),
+    completionTokens: v.optional(v.number()),
+    cachedPromptTokens: v.optional(v.number()),
+    // API integration specific
+    apiIntegrationId: v.optional(v.id("apiIntegrations")),
+    // Metadata
+    metadata: v.optional(v.any()),
+    timestamp: v.number(),
+  })
+    .index("byMemberId", ["memberId", "timestamp"])
+    .index("byChatId", ["chatId", "timestamp"])
+    .index("byResourceType", ["resourceType", "timestamp"])
+    .index("byApiIntegration", ["apiIntegrationId", "timestamp"]),
+
+  // ========== NATIVE API INTEGRATIONS ==========
+
+  /*
+   * API Integration definitions - these are the data source connectors
+   */
+  apiIntegrations: defineTable({
+    memberId: v.id("convexMembers"),
+    name: v.string(), // user-friendly name
+    provider: v.union(
+      v.literal("rest_api"),
+      v.literal("graphql"),
+      v.literal("postgres"),
+      v.literal("mysql"),
+      v.literal("mongodb"),
+      v.literal("airtable"),
+      v.literal("google_sheets"),
+      v.literal("stripe"),
+      v.literal("salesforce"),
+      v.literal("hubspot"),
+      v.literal("shopify"),
+      v.literal("firebase"),
+      v.literal("supabase"),
+      v.literal("custom"),
+    ),
+    status: v.union(
+      v.literal("active"),
+      v.literal("inactive"),
+      v.literal("error"),
+      v.literal("testing"),
+    ),
+    // Connection configuration (encrypted in production)
+    config: v.object({
+      // For REST/GraphQL APIs
+      baseUrl: v.optional(v.string()),
+      authType: v.optional(
+        v.union(
+          v.literal("none"),
+          v.literal("api_key"),
+          v.literal("bearer_token"),
+          v.literal("oauth2"),
+          v.literal("basic_auth"),
+        ),
+      ),
+      apiKey: v.optional(v.string()),
+      apiKeyHeader: v.optional(v.string()),
+      bearerToken: v.optional(v.string()),
+      basicAuthUsername: v.optional(v.string()),
+      basicAuthPassword: v.optional(v.string()),
+      oauth2AccessToken: v.optional(v.string()),
+      oauth2RefreshToken: v.optional(v.string()),
+      oauth2TokenExpiry: v.optional(v.number()),
+      // For databases
+      host: v.optional(v.string()),
+      port: v.optional(v.number()),
+      database: v.optional(v.string()),
+      username: v.optional(v.string()),
+      password: v.optional(v.string()),
+      connectionString: v.optional(v.string()),
+      // Common settings
+      headers: v.optional(v.any()), // custom headers as object
+      timeout: v.optional(v.number()),
+      retryAttempts: v.optional(v.number()),
+    }),
+    // Schema information (cached from data source)
+    schema: v.optional(
+      v.object({
+        tables: v.optional(v.array(v.any())),
+        endpoints: v.optional(v.array(v.any())),
+        types: v.optional(v.any()),
+        lastUpdated: v.number(),
+      }),
+    ),
+    // Usage tracking
+    totalRequests: v.number(),
+    failedRequests: v.number(),
+    lastUsedAt: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastErrorMessage: v.optional(v.string()),
+    // Metadata
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "status"])
+    .index("byProvider", ["provider", "status"]),
+
+  /*
+   * Saved queries/operations for API integrations
+   */
+  apiQueries: defineTable({
+    memberId: v.id("convexMembers"),
+    integrationId: v.id("apiIntegrations"),
+    name: v.string(),
+    description: v.optional(v.string()),
+    // Query definition
+    queryType: v.union(
+      v.literal("rest_get"),
+      v.literal("rest_post"),
+      v.literal("rest_put"),
+      v.literal("rest_delete"),
+      v.literal("graphql_query"),
+      v.literal("graphql_mutation"),
+      v.literal("sql_select"),
+      v.literal("sql_insert"),
+      v.literal("sql_update"),
+      v.literal("sql_delete"),
+    ),
+    endpoint: v.optional(v.string()), // for REST
+    query: v.optional(v.string()), // SQL or GraphQL query
+    variables: v.optional(v.any()), // query parameters/variables
+    requestBody: v.optional(v.any()),
+    // Caching
+    cacheEnabled: v.boolean(),
+    cacheTTL: v.optional(v.number()), // in seconds
+    // Metadata
+    usageCount: v.number(),
+    lastUsedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("byIntegration", ["integrationId", "name"])
+    .index("byMemberId", ["memberId"]),
+
+  /*
+   * Webhook configurations for real-time data updates
+   */
+  webhooks: defineTable({
+    memberId: v.id("convexMembers"),
+    integrationId: v.optional(v.id("apiIntegrations")),
+    name: v.string(),
+    url: v.string(), // external webhook URL to call
+    events: v.array(v.string()), // events that trigger this webhook
+    isActive: v.boolean(),
+    secret: v.optional(v.string()), // for webhook signature verification
+    headers: v.optional(v.any()),
+    retryPolicy: v.object({
+      maxRetries: v.number(),
+      retryDelayMs: v.number(),
+    }),
+    // Stats
+    totalCalls: v.number(),
+    failedCalls: v.number(),
+    lastCalledAt: v.optional(v.number()),
+    lastFailureAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "isActive"])
+    .index("byIntegration", ["integrationId"]),
+
+  // ========== BILLING & PAYMENT RECORDS ==========
+
+  /*
+   * Payment transactions
+   */
+  payments: defineTable({
+    memberId: v.id("convexMembers"),
+    subscriptionId: v.optional(v.id("subscriptions")),
+    amount: v.number(), // in cents
+    currency: v.string(),
+    status: v.union(
+      v.literal("succeeded"),
+      v.literal("pending"),
+      v.literal("failed"),
+      v.literal("refunded"),
+    ),
+    paymentMethod: v.union(
+      v.literal("card"),
+      v.literal("bank_transfer"),
+      v.literal("paypal"),
+      v.literal("other"),
+    ),
+    // Stripe
+    stripePaymentIntentId: v.optional(v.string()),
+    stripeChargeId: v.optional(v.string()),
+    // Metadata
+    description: v.string(),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "createdAt"])
+    .index("byStripePaymentIntentId", ["stripePaymentIntentId"])
+    .index("byStatus", ["status", "createdAt"]),
+
+  /*
+   * Invoices
+   */
+  invoices: defineTable({
+    memberId: v.id("convexMembers"),
+    subscriptionId: v.optional(v.id("subscriptions")),
+    invoiceNumber: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("open"),
+      v.literal("paid"),
+      v.literal("void"),
+      v.literal("uncollectible"),
+    ),
+    // Amounts
+    subtotal: v.number(),
+    tax: v.number(),
+    total: v.number(),
+    amountPaid: v.number(),
+    amountDue: v.number(),
+    currency: v.string(),
+    // Line items
+    lineItems: v.array(
+      v.object({
+        description: v.string(),
+        quantity: v.number(),
+        unitAmount: v.number(),
+        amount: v.number(),
+      }),
+    ),
+    // Dates
+    periodStart: v.number(),
+    periodEnd: v.number(),
+    dueDate: v.optional(v.number()),
+    paidAt: v.optional(v.number()),
+    // Stripe
+    stripeInvoiceId: v.optional(v.string()),
+    stripeInvoiceUrl: v.optional(v.string()),
+    stripeInvoicePdf: v.optional(v.string()),
+    // Metadata
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "createdAt"])
+    .index("byStripeInvoiceId", ["stripeInvoiceId"])
+    .index("byStatus", ["status", "createdAt"])
+    .index("byInvoiceNumber", ["invoiceNumber"]),
+
+  // ========== ANALYTICS & REPORTING ==========
+
+  /*
+   * Daily usage aggregations for analytics
+   */
+  dailyUsageStats: defineTable({
+    memberId: v.id("convexMembers"),
+    date: v.string(), // YYYY-MM-DD format
+    // Aggregated metrics
+    totalCreditsSpent: v.number(),
+    totalApiCalls: v.number(),
+    totalTokens: v.number(),
+    totalPromptTokens: v.number(),
+    totalCompletionTokens: v.number(),
+    // By resource type
+    usageByResource: v.any(), // map of resourceType -> count
+    // By integration
+    usageByIntegration: v.any(), // map of integrationId -> count
+    // Project count
+    activeProjects: v.number(),
+    createdAt: v.number(),
+  })
+    .index("byMemberId", ["memberId", "date"])
+    .index("byDate", ["date"]),
 });
